@@ -110,7 +110,13 @@ class TGGroupScraper:
     def get_group_data_dir(self, group_name: str) -> Path:
         """获取指定群组的数据目录"""
         # 清理群组名，用于文件夹名称
-        safe_group_name = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in group_name)
+        # 只允许字母、数字、下划线和连字符，防止路径遍历攻击
+        safe_group_name = "".join(c if c.isalnum() or c in ('_', '-') else '_' for c in group_name)
+        # 确保不是空的或只包含特殊字符
+        if not safe_group_name or safe_group_name.strip('_-') == '':
+            safe_group_name = f"group_{hash(group_name) % 100000}"
+        # 防止路径遍历
+        safe_group_name = safe_group_name.lstrip('.')
         group_dir = self.base_data_dir / safe_group_name
         group_dir.mkdir(exist_ok=True)
         return group_dir
@@ -449,18 +455,36 @@ async def scrape_yesterday():
     """爬取昨天的消息（用于定时任务）
     
     这个函数会自动设置日期范围为昨天，适合配合cron或其他定时任务工具使用
+    注意：这个函数不会修改.env文件，只是临时设置日期范围
     """
     yesterday = datetime.now() - timedelta(days=1)
     yesterday_str = yesterday.strftime('%Y-%m-%d')
     
-    # 设置环境变量来过滤昨天的消息
-    os.environ['START_DATE'] = yesterday_str
-    os.environ['END_DATE'] = yesterday_str
-    
     print(f"定时任务：爬取昨天 ({yesterday_str}) 的消息")
     
-    scraper = TGGroupScraper()
-    await scraper.scrape_all_groups()
+    # 临时设置日期范围（不修改全局环境变量）
+    # 创建一个临时的环境变量副本
+    original_start = os.environ.get('START_DATE')
+    original_end = os.environ.get('END_DATE')
+    
+    try:
+        os.environ['START_DATE'] = yesterday_str
+        os.environ['END_DATE'] = yesterday_str
+        
+        scraper = TGGroupScraper()
+        await scraper.scrape_all_groups()
+        
+    finally:
+        # 恢复原始环境变量
+        if original_start is None:
+            os.environ.pop('START_DATE', None)
+        else:
+            os.environ['START_DATE'] = original_start
+            
+        if original_end is None:
+            os.environ.pop('END_DATE', None)
+        else:
+            os.environ['END_DATE'] = original_end
 
 
 if __name__ == '__main__':
