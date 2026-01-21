@@ -1,0 +1,29 @@
+# Environment files
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Telegram session files
+*.session
+*.session-journal
+
+# Data files
+data/
+*.csv
+
+# Checkpoint files
+checkpoint.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
