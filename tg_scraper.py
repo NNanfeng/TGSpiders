@@ -11,7 +11,7 @@ import json
 import asyncio
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 from dotenv import load_dotenv
 
 from telethon import TelegramClient
@@ -32,13 +32,18 @@ class TGGroupScraper:
     
     def __init__(self):
         """初始化爬虫"""
-        self.api_id = int(os.getenv('API_ID', '0'))
+        api_id_str = os.getenv('API_ID', '')
         self.api_hash = os.getenv('API_HASH', '')
         self.phone = os.getenv('PHONE', '')
         self.group_username = os.getenv('GROUP_USERNAME', '')
         
-        if not all([self.api_id, self.api_hash, self.phone, self.group_username]):
+        if not all([api_id_str, self.api_hash, self.phone, self.group_username]):
             raise ValueError("请在.env文件中配置所有必需的参数")
+        
+        try:
+            self.api_id = int(api_id_str)
+        except ValueError:
+            raise ValueError("API_ID 必须是有效的整数")
         
         self.client = TelegramClient('tg_scraper_session', self.api_id, self.api_hash)
         self.checkpoint_file = 'checkpoint.json'
@@ -142,7 +147,7 @@ class TGGroupScraper:
         
         return info
     
-    async def extract_txt_content(self, message) -> tuple[Optional[str], Optional[int]]:
+    async def extract_txt_content(self, message) -> Tuple[Optional[str], Optional[int]]:
         """提取txt文件内容"""
         if not message.media:
             return None, None
@@ -202,6 +207,12 @@ class TGGroupScraper:
             else:
                 media_type = type(message.media).__name__
         
+        # 提取转发信息
+        forward_from_id = ''
+        if message.fwd_from:
+            if message.fwd_from.from_id and hasattr(message.fwd_from.from_id, 'user_id'):
+                forward_from_id = message.fwd_from.from_id.user_id
+        
         # 构建消息数据
         message_data = {
             'message_id': message.id,
@@ -210,7 +221,7 @@ class TGGroupScraper:
             **sender_info,
             'message_text': self.escape_csv_content(message.text),
             'reply_to_msg_id': message.reply_to_msg_id or '',
-            'forward_from_id': message.fwd_from.from_id.user_id if message.fwd_from and hasattr(message.fwd_from.from_id, 'user_id') else '',
+            'forward_from_id': forward_from_id,
             'forward_from_name': message.fwd_from.from_name if message.fwd_from else '',
             'views': message.views or 0,
             'forwards': message.forwards or 0,
