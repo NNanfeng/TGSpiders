@@ -8,6 +8,7 @@ Telegram Group Message Scraper
 import os
 import csv
 import json
+import re
 import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -167,7 +168,6 @@ class TGGroupScraper:
         # 这对Elasticsearch导入特别重要
         text = str(text).replace('\r\n', ' ').replace('\r', ' ').replace('\n', ' ')
         # 压缩多个连续空格为单个空格
-        import re
         text = re.sub(r'\s+', ' ', text)
         return text.strip()
     
