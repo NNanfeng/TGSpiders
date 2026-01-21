@@ -5,10 +5,12 @@
 ## 功能特点
 
 - ✅ 支持爬取公开群组的所有历史消息
+- ✅ **支持同时爬取多个群组，每个群组独立存储**
+- ✅ **支持日期范围过滤，可定时爬取前一天的消息**
 - ✅ 按月自动分割 CSV 文件，便于管理大量数据
 - ✅ 详细的 CSV 表头，包含发送者信息、消息内容等完整数据
 - ✅ 完善的断点续传机制，支持中断后继续爬取
-- ✅ 自动处理换行符，确保 CSV 格式正确
+- ✅ **自动处理换行符，优化Elasticsearch导入兼容性**
 - ✅ 支持提取 txt 文件内容并保存到 CSV
 - ✅ 从旧到新的时间顺序爬取
 - ✅ 不下载其他媒体文件（图片、视频等），节省空间
@@ -80,14 +82,27 @@ cp .env.example .env
 API_ID=your_api_id
 API_HASH=your_api_hash
 PHONE=your_phone_number
-GROUP_USERNAME=target_group_username
+
+# 单个群组
+GROUP_USERNAMES=target_group_username
+
+# 或者多个群组（用逗号分隔）
+GROUP_USERNAMES=group1,group2,group3
+
+# 可选：日期范围过滤（用于定时爬取）
+# START_DATE=2024-01-01
+# END_DATE=2024-01-31
 ```
 
 **参数说明：**
 - `API_ID`: 从 my.telegram.org 获取的 API ID
 - `API_HASH`: 从 my.telegram.org 获取的 API Hash
 - `PHONE`: 你的 Telegram 手机号（包含国家代码，如 +86）
-- `GROUP_USERNAME`: 目标群组的用户名（不带 @ 符号）
+- `GROUP_USERNAMES`: 目标群组的用户名（不带 @ 符号）
+  - 单个群组：`GROUP_USERNAMES=mygroup`
+  - 多个群组：`GROUP_USERNAMES=group1,group2,group3`
+- `START_DATE`: 可选，开始日期（格式：YYYY-MM-DD）
+- `END_DATE`: 可选，结束日期（格式：YYYY-MM-DD）
 
 ## 使用方法
 
@@ -111,14 +126,49 @@ python tg_scraper.py
 
 ### 查看数据
 
-爬取的数据保存在 `data/` 目录下，按月份分文件：
+爬取的数据保存在 `data/` 目录下，每个群组有独立的子目录，按月份分文件：
 
 ```
 data/
-├── messages_2024-01.csv
-├── messages_2024-02.csv
-├── messages_2024-03.csv
+├── group1/
+│   ├── checkpoint.json
+│   ├── messages_2024-01.csv
+│   ├── messages_2024-02.csv
+│   └── ...
+├── group2/
+│   ├── checkpoint.json
+│   ├── messages_2024-01.csv
+│   └── ...
 └── ...
+```
+
+### 日期范围爬取
+
+如果需要爬取特定日期范围的消息，可以在 `.env` 文件中设置：
+
+```bash
+START_DATE=2024-01-01
+END_DATE=2024-01-31
+```
+
+### 定时爬取昨天的消息
+
+对于需要每天定时爬取前一天消息的场景，可以创建一个脚本：
+
+```python
+# daily_scraper.py
+import asyncio
+from tg_scraper import scrape_yesterday
+
+if __name__ == '__main__':
+    asyncio.run(scrape_yesterday())
+```
+
+然后使用 cron 或其他定时任务工具：
+
+```bash
+# 每天凌晨1点执行
+0 1 * * * cd /path/to/TGSpiders && python daily_scraper.py
 ```
 
 ## 文件结构
@@ -130,9 +180,14 @@ TGSpiders/
 ├── .env.example          # 配置文件示例
 ├── .env                  # 配置文件（需自行创建）
 ├── .gitignore           # Git 忽略文件
-├── checkpoint.json      # 断点记录（自动生成）
 ├── data/                # 数据目录（自动生成）
-│   └── messages_*.csv   # 按月分割的消息文件
+│   ├── group1/          # 群组1数据目录
+│   │   ├── checkpoint.json      # 断点记录
+│   │   └── messages_*.csv       # 按月分割的消息文件
+│   ├── group2/          # 群组2数据目录
+│   │   ├── checkpoint.json
+│   │   └── messages_*.csv
+│   └── ...
 └── tg_scraper_session.session  # Telegram 会话文件（自动生成）
 ```
 
@@ -146,11 +201,15 @@ TGSpiders/
 
 3. **存储空间**：确保有足够的磁盘空间存储 CSV 文件
 
-4. **换行处理**：消息中的换行符会被正确保存在 CSV 中（通过双引号包裹），可以正常使用 Excel 或其他工具打开
+4. **换行处理**：消息中的换行符会被替换为空格，这样可以避免CSV多行记录问题，并优化Elasticsearch导入兼容性
 
 5. **txt 文件**：如果消息包含 txt 文件附件，程序会自动下载并提取内容，保存到 `txt_content` 字段
 
 6. **媒体文件**：程序不会下载图片、视频等其他媒体文件，只会记录文件名和大小
+
+7. **多群组爬取**：每个群组的数据独立存储在各自的子目录中，互不影响
+
+8. **断点续传**：每个群组都有独立的检查点文件，可以独立中断和恢复
 
 ## 常见问题
 
@@ -172,15 +231,37 @@ A: 程序使用 `utf-8-sig` 编码（带 BOM 标记），Excel 应该能正确�
 
 ### Q: 如何重新爬取？
 
-A: 删除 `checkpoint.json` 文件和 `data/` 目录，然后重新运行程序。
+A: 删除对应群组目录下的 `checkpoint.json` 文件，然后重新运行程序。如果要重新爬取所有群组，删除整个 `data/` 目录。
+
+### Q: 如何爬取多个群组？
+
+A: 在 `.env` 文件中的 `GROUP_USERNAMES` 使用逗号分隔多个群组名，例如：`GROUP_USERNAMES=group1,group2,group3`
+
+### Q: 如何只爬取某个日期范围的消息？
+
+A: 在 `.env` 文件中设置 `START_DATE` 和 `END_DATE`，格式为 `YYYY-MM-DD`。例如只爬取2024年1月的消息：
+```
+START_DATE=2024-01-01
+END_DATE=2024-01-31
+```
+
+### Q: 如何设置定时任务每天爬取昨天的消息？
+
+A: 创建一个使用 `scrape_yesterday()` 函数的脚本，然后使用 cron 或其他定时任务工具每天执行。详见"定时爬取昨天的消息"部分。
+
+### Q: CSV文件导入Elasticsearch时出现问题？
+
+A: 新版本已经优化了换行符处理，消息文本中的换行符会被替换为空格，避免了CSV多行记录问题。如果仍有问题，请确保使用最新版本的代码。
 
 ## 技术细节
 
 - **Telethon**: 使用 Telethon 库与 Telegram API 交互
 - **异步编程**: 基于 asyncio 实现高效的异步爬取
-- **CSV 处理**: 正确处理换行、特殊字符等，确保 CSV 格式规范
-- **断点机制**: JSON 文件记录爬取进度，支持随时中断和恢复
+- **CSV 处理**: 将换行符替换为空格，确保CSV格式规范且兼容Elasticsearch
+- **断点机制**: 每个群组独立的JSON文件记录爬取进度，支持随时中断和恢复
 - **按月分文件**: 自动根据消息日期分割 CSV 文件，避免单文件过大
+- **多群组支持**: 每个群组独立的数据目录和检查点，支持并行管理多个群组
+- **日期过滤**: 支持按日期范围过滤消息，适合定时任务场景
 - **编码检测**: 对 txt 文件尝试多种编码（UTF-8, GBK, GB2312, UTF-16）
 
 ## 许可证
