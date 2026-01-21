@@ -8,10 +8,11 @@ Telegram Group Message Scraper
 import os
 import csv
 import json
+import re
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 from dotenv import load_dotenv
 
 from telethon import TelegramClient
@@ -30,14 +31,33 @@ load_dotenv()
 class TGGroupScraper:
     """Telegram群组消息爬虫"""
     
-    def __init__(self):
-        """初始化爬虫"""
+    def __init__(self, group_username: Optional[str] = None):
+        """初始化爬虫
+        
+        Args:
+            group_username: 指定单个群组用户名（可选，用于向后兼容）
+        """
         api_id_str = os.getenv('API_ID', '')
         self.api_hash = os.getenv('API_HASH', '')
         self.phone = os.getenv('PHONE', '')
-        self.group_username = os.getenv('GROUP_USERNAME', '')
         
-        if not all([api_id_str, self.api_hash, self.phone, self.group_username]):
+        # 支持多种配置方式
+        if group_username:
+            # 直接指定单个群组
+            self.group_usernames = [group_username]
+        else:
+            # 从环境变量读取，支持多个群组
+            group_usernames_str = os.getenv('GROUP_USERNAMES', os.getenv('GROUP_USERNAME', ''))
+            if not group_usernames_str:
+                raise ValueError("请在.env文件中配置 GROUP_USERNAMES 或 GROUP_USERNAME")
+            # 支持逗号分隔的多个群组
+            self.group_usernames = [g.strip() for g in group_usernames_str.split(',') if g.strip()]
+        
+        # 日期范围过滤（可选）
+        self.start_date = self._parse_date(os.getenv('START_DATE', ''))
+        self.end_date = self._parse_date(os.getenv('END_DATE', ''))
+        
+        if not all([api_id_str, self.api_hash, self.phone, self.group_usernames]):
             raise ValueError("请在.env文件中配置所有必需的参数")
         
         try:
@@ -46,9 +66,8 @@ class TGGroupScraper:
             raise ValueError("API_ID 必须是有效的整数")
         
         self.client = TelegramClient('tg_scraper_session', self.api_id, self.api_hash)
-        self.checkpoint_file = 'checkpoint.json'
-        self.data_dir = Path('data')
-        self.data_dir.mkdir(exist_ok=True)
+        self.base_data_dir = Path('data')
+        self.base_data_dir.mkdir(exist_ok=True)
         
         # CSV表头
         self.csv_headers = [
@@ -78,31 +97,63 @@ class TGGroupScraper:
             'post_author',          # 发帖者
         ]
     
-    def load_checkpoint(self) -> Dict[str, Any]:
+    def _parse_date(self, date_str: str) -> Optional[datetime]:
+        """解析日期字符串"""
+        if not date_str:
+            return None
+        try:
+            return datetime.strptime(date_str, '%Y-%m-%d')
+        except ValueError:
+            print(f"警告：日期格式错误: {date_str}，将忽略此日期过滤")
+            return None
+    
+    def get_group_data_dir(self, group_name: str) -> Path:
+        """获取指定群组的数据目录"""
+        # 清理群组名，用于文件夹名称
+        # 只允许字母、数字、下划线和连字符，防止路径遍历攻击
+        safe_group_name = "".join(c if c.isalnum() or c in ('_', '-') else '_' for c in group_name)
+        # 确保不是空的或只包含特殊字符
+        if not safe_group_name or safe_group_name.strip('_-') == '':
+            safe_group_name = f"group_{hash(group_name) % 100000}"
+        # 防止路径遍历
+        safe_group_name = safe_group_name.lstrip('.')
+        group_dir = self.base_data_dir / safe_group_name
+        group_dir.mkdir(exist_ok=True)
+        return group_dir
+    
+    def get_checkpoint_file(self, group_name: str) -> Path:
+        """获取指定群组的检查点文件"""
+        group_dir = self.get_group_data_dir(group_name)
+        return group_dir / 'checkpoint.json'
+    
+    def load_checkpoint(self, group_name: str) -> Dict[str, Any]:
         """加载检查点"""
-        if os.path.exists(self.checkpoint_file):
+        checkpoint_file = self.get_checkpoint_file(group_name)
+        if checkpoint_file.exists():
             try:
-                with open(self.checkpoint_file, 'r', encoding='utf-8') as f:
+                with open(checkpoint_file, 'r', encoding='utf-8') as f:
                     return json.load(f)
             except Exception as e:
                 print(f"加载检查点失败: {e}")
                 return {}
         return {}
     
-    def save_checkpoint(self, last_message_id: int, last_date: str):
+    def save_checkpoint(self, group_name: str, last_message_id: int, last_date: str):
         """保存检查点"""
         checkpoint = {
             'last_message_id': last_message_id,
             'last_date': last_date,
             'updated_at': datetime.now().isoformat()
         }
-        with open(self.checkpoint_file, 'w', encoding='utf-8') as f:
+        checkpoint_file = self.get_checkpoint_file(group_name)
+        with open(checkpoint_file, 'w', encoding='utf-8') as f:
             json.dump(checkpoint, f, indent=2, ensure_ascii=False)
     
-    def get_csv_filename(self, date: datetime) -> Path:
+    def get_csv_filename(self, group_name: str, date: datetime) -> Path:
         """根据日期获取CSV文件名（按月分文件）"""
+        group_dir = self.get_group_data_dir(group_name)
         month_str = date.strftime('%Y-%m')
-        return self.data_dir / f"messages_{month_str}.csv"
+        return group_dir / f"messages_{month_str}.csv"
     
     def ensure_csv_exists(self, filename: Path):
         """确保CSV文件存在并有表头"""
@@ -112,12 +163,19 @@ class TGGroupScraper:
                 writer.writeheader()
     
     def escape_csv_content(self, text: Optional[str]) -> str:
-        """转义CSV内容，处理换行符等特殊字符"""
+        """转义CSV内容，处理换行符等特殊字符
+        
+        为了防止Elasticsearch导入时出现问题，将换行符替换为空格
+        这样可以保持文本的可读性，同时避免多行记录问题
+        """
         if text is None:
             return ''
-        # CSV会自动处理包含换行的内容（通过双引号包裹）
-        # 但我们需要确保内容是字符串类型
-        return str(text).replace('\r\n', '\n').replace('\r', '\n')
+        # 将各种换行符统一替换为空格，防止CSV多行记录问题
+        # 这对Elasticsearch导入特别重要
+        text = str(text).replace('\r\n', ' ').replace('\r', ' ').replace('\n', ' ')
+        # 压缩多个连续空格为单个空格
+        text = re.sub(r'\s+', ' ', text)
+        return text.strip()
     
     async def get_sender_info(self, sender) -> Dict[str, Any]:
         """获取发送者信息"""
@@ -238,18 +296,24 @@ class TGGroupScraper:
         
         return message_data
     
-    async def scrape_group(self):
-        """爬取群组消息"""
-        await self.client.start(self.phone)
-        print(f"已登录 Telegram")
+    async def scrape_group(self, group_username: str):
+        """爬取单个群组消息
+        
+        Args:
+            group_username: 群组用户名
+        """
+        print(f"\n{'='*60}")
+        print(f"开始爬取群组: {group_username}")
+        print(f"{'='*60}")
         
         try:
             # 获取群组实体
-            entity = await self.client.get_entity(self.group_username)
-            print(f"找到群组: {entity.title if hasattr(entity, 'title') else self.group_username}")
+            entity = await self.client.get_entity(group_username)
+            group_title = entity.title if hasattr(entity, 'title') else group_username
+            print(f"找到群组: {group_title}")
             
             # 加载检查点
-            checkpoint = self.load_checkpoint()
+            checkpoint = self.load_checkpoint(group_username)
             start_message_id = checkpoint.get('last_message_id', 0)
             
             if start_message_id:
@@ -257,8 +321,18 @@ class TGGroupScraper:
             else:
                 print("从头开始爬取")
             
+            # 显示日期过滤信息
+            if self.start_date or self.end_date:
+                print(f"日期过滤: ", end='')
+                if self.start_date:
+                    print(f"从 {self.start_date.strftime('%Y-%m-%d')} ", end='')
+                if self.end_date:
+                    print(f"到 {self.end_date.strftime('%Y-%m-%d')} ", end='')
+                print()
+            
             # 统计信息
             total_messages = 0
+            filtered_messages = 0
             current_csv_file = None
             csv_writer = None
             csv_file_handle = None
@@ -271,11 +345,23 @@ class TGGroupScraper:
                 min_id=start_message_id
             ):
                 try:
+                    # 日期过滤
+                    if message.date:
+                        # 如果指定了开始日期，跳过更早的消息
+                        if self.start_date and message.date.date() < self.start_date.date():
+                            filtered_messages += 1
+                            continue
+                        # 如果指定了结束日期，跳过更晚的消息
+                        if self.end_date and message.date.date() > self.end_date.date():
+                            filtered_messages += 1
+                            # 如果已经超过结束日期，可以提前结束
+                            break
+                    
                     # 处理消息
                     message_data = await self.process_message(message)
                     
                     # 获取对应的CSV文件
-                    csv_filename = self.get_csv_filename(message.date)
+                    csv_filename = self.get_csv_filename(group_username, message.date)
                     
                     # 如果需要切换CSV文件
                     if current_csv_file != csv_filename:
@@ -306,6 +392,7 @@ class TGGroupScraper:
                             csv_file_handle.flush()
                         # 保存检查点
                         self.save_checkpoint(
+                            group_username,
                             last_message_id,
                             message.date.strftime('%Y-%m-%d %H:%M:%S')
                         )
@@ -320,15 +407,40 @@ class TGGroupScraper:
             
             # 保存最终检查点
             if last_message_id > start_message_id:
-                self.save_checkpoint(last_message_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                self.save_checkpoint(group_username, last_message_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
             
-            print(f"\n爬取完成！")
+            print(f"\n群组 {group_title} 爬取完成！")
             print(f"总共处理: {total_messages} 条消息")
-            print(f"数据保存在: {self.data_dir}")
+            if filtered_messages > 0:
+                print(f"过滤掉: {filtered_messages} 条消息（不在日期范围内）")
+            group_dir = self.get_group_data_dir(group_username)
+            print(f"数据保存在: {group_dir}")
             
         except Exception as e:
-            print(f"爬取过程中出错: {e}")
+            print(f"爬取群组 {group_username} 时出错: {e}")
             raise
+    
+    async def scrape_all_groups(self):
+        """爬取所有配置的群组"""
+        await self.client.start(self.phone)
+        print(f"已登录 Telegram")
+        
+        try:
+            print(f"\n总共需要爬取 {len(self.group_usernames)} 个群组")
+            
+            for idx, group_username in enumerate(self.group_usernames, 1):
+                print(f"\n进度: [{idx}/{len(self.group_usernames)}]")
+                try:
+                    await self.scrape_group(group_username)
+                except Exception as e:
+                    print(f"群组 {group_username} 爬取失败: {e}")
+                    # 继续处理下一个群组
+                    continue
+            
+            print(f"\n{'='*60}")
+            print("所有群组爬取完成！")
+            print(f"{'='*60}")
+            
         finally:
             await self.client.disconnect()
 
@@ -336,7 +448,43 @@ class TGGroupScraper:
 async def main():
     """主函数"""
     scraper = TGGroupScraper()
-    await scraper.scrape_group()
+    await scraper.scrape_all_groups()
+
+
+async def scrape_yesterday():
+    """爬取昨天的消息（用于定时任务）
+    
+    这个函数会自动设置日期范围为昨天，适合配合cron或其他定时任务工具使用
+    注意：这个函数不会修改.env文件，只是临时设置日期范围
+    """
+    yesterday = datetime.now() - timedelta(days=1)
+    yesterday_str = yesterday.strftime('%Y-%m-%d')
+    
+    print(f"定时任务：爬取昨天 ({yesterday_str}) 的消息")
+    
+    # 临时设置日期范围（不修改全局环境变量）
+    # 创建一个临时的环境变量副本
+    original_start = os.environ.get('START_DATE')
+    original_end = os.environ.get('END_DATE')
+    
+    try:
+        os.environ['START_DATE'] = yesterday_str
+        os.environ['END_DATE'] = yesterday_str
+        
+        scraper = TGGroupScraper()
+        await scraper.scrape_all_groups()
+        
+    finally:
+        # 恢复原始环境变量
+        if original_start is None:
+            os.environ.pop('START_DATE', None)
+        else:
+            os.environ['START_DATE'] = original_start
+            
+        if original_end is None:
+            os.environ.pop('END_DATE', None)
+        else:
+            os.environ['END_DATE'] = original_end
 
 
 if __name__ == '__main__':
